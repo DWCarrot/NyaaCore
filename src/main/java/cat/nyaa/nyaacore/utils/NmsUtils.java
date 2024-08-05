@@ -11,15 +11,15 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
-import org.bukkit.craftbukkit.v1_20_R1.CraftWorld;
-import org.bukkit.craftbukkit.v1_20_R1.entity.CraftEntity;
-import org.bukkit.craftbukkit.v1_20_R1.entity.CraftLivingEntity;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.LivingEntity;
+import org.jetbrains.annotations.Nullable;
 
+import java.lang.reflect.Field;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 /**
@@ -30,9 +30,63 @@ import java.util.stream.Collectors;
  * since all NMS codes are here.
  */
 public final class NmsUtils {
+
+    static Class<?> klassCraftEntity;
+    static Field handleCraftEntity;
+    static Class<?> klassCraftWorld;
+    static Field handleCraftWorld;
+
+    static {
+        Logger logger = Logger.getLogger(NmsUtils.class.getName());
+        try {
+            klassCraftEntity = Class.forName("org.bukkit.craftbukkit.entity.CraftEntity");
+            handleCraftEntity = klassCraftEntity.getDeclaredField("entity"); // net.minecraft.world.entity.Entity
+            handleCraftEntity.setAccessible(true);
+            klassCraftWorld = Class.forName("org.bukkit.craftbukkit.CraftWorld");
+            handleCraftWorld = klassCraftWorld.getDeclaredField("world"); // net.minecraft.server.level.ServerLevel
+            handleCraftWorld.setAccessible(true);
+            logger.info("NmsUtils initialized");
+        } catch (ClassNotFoundException e) {
+            logger.severe("Failed to initialize NmsUtils: " + e.getMessage());
+        } catch (NoSuchFieldException e) {
+            logger.severe("Failed to initialize NmsUtils: " + e.getMessage());
+        }
+    }
+
+    static @Nullable net.minecraft.world.entity.Entity getEntity(Entity entity) {
+        if(klassCraftEntity == null || handleCraftEntity == null) {
+            return null;
+        }
+        if(!klassCraftEntity.isInstance(entity)) {
+            return null;
+        }
+        try {
+            return (net.minecraft.world.entity.Entity) handleCraftEntity.get(entity);
+        } catch (IllegalAccessException e) {
+            return null;
+        }
+    }
+
+    static @Nullable net.minecraft.world.level.Level getWorld(World world) {
+        if(klassCraftWorld == null || handleCraftWorld == null) {
+            return null;
+        }
+        if(klassCraftWorld.isInstance(world)) {
+            return null;
+        }
+        try {
+            return (net.minecraft.world.level.Level) handleCraftWorld.get(world);
+        } catch (IllegalAccessException e) {
+            return null;
+        }
+    }
+
     /* see CommandEntityData.java */
     public static void setEntityTag(Entity e, String tag) {
-        net.minecraft.world.entity.Entity nmsEntity = ((CraftEntity) e).getHandle();
+        net.minecraft.world.entity.Entity nmsEntity = getEntity(e);
+        if(nmsEntity == null) {
+            return;
+        }
 
         if (nmsEntity instanceof Player) {
             throw new IllegalArgumentException("Player NBT cannot be edited");
@@ -58,7 +112,16 @@ public final class NmsUtils {
     }
 
     public static boolean createExplosion(World world, Entity entity, double x, double y, double z, float power, boolean setFire, boolean breakBlocks) {
-        return !((CraftWorld) world).getHandle().explode(((CraftEntity) entity).getHandle(), x, y, z, power, setFire, breakBlocks ? Level.ExplosionInteraction.MOB : Level.ExplosionInteraction.NONE).wasCanceled;
+        net.minecraft.world.level.Level nmsWorld = getWorld(world);
+        if(nmsWorld == null) {
+            return false;
+        }
+        net.minecraft.world.entity.Entity nmsEntity = getEntity(entity);
+        if(nmsEntity == null) {
+            return false;
+        }
+
+        return !nmsWorld.explode(nmsEntity, x, y, z, power, setFire, breakBlocks ? Level.ExplosionInteraction.MOB : Level.ExplosionInteraction.NONE).wasCanceled;
     }
 
     /**
@@ -91,13 +154,14 @@ public final class NmsUtils {
     public static void updateEntityYawPitch(LivingEntity entity, Float newYaw, Float newPitch) {
         if (entity == null) throw new IllegalArgumentException();
         if (newYaw == null && newPitch == null) return;
-        CraftLivingEntity nmsEntity = (CraftLivingEntity) entity;
+        net.minecraft.world.entity.Entity nmsEntity = getEntity(entity);
+        if (nmsEntity == null) return;
         if (newYaw != null) {
-            nmsEntity.getHandle().setYRot(newYaw);
+            nmsEntity.setYRot(newYaw);
         }
 
         if (newPitch != null) {
-            nmsEntity.getHandle().setXRot(newPitch);
+            nmsEntity.setXRot(newPitch);
         }
     }
 
@@ -109,18 +173,23 @@ public final class NmsUtils {
      */
     public static void setEntityOnGround(Entity e, boolean isOnGround) {
         if (e == null) throw new IllegalArgumentException();
-        CraftEntity nmsEntity = (CraftEntity) e;
-        nmsEntity.getHandle().setOnGround(isOnGround); //nms method renamed
+        net.minecraft.world.entity.Entity nmsEntity = getEntity(e);
+        if (nmsEntity == null) return;
+        nmsEntity.setOnGround(isOnGround); //nms method renamed
     }
 
     public static List<Block> getTileEntities(World world) {
-        Map<BlockPos, BlockEntity> BlockEntityList = ((CraftWorld) world).getHandle().capturedTileEntities;
+        net.minecraft.world.level.Level nmsWorld = getWorld(world);
+        if(nmsWorld == null) return List.of();
+        Map<BlockPos, BlockEntity> BlockEntityList = nmsWorld.capturedTileEntities;
         // Safe to parallelize getPosition and getBlockAt
         return BlockEntityList.entrySet().stream().parallel().map(Map.Entry::getKey).map(p -> world.getBlockAt(p.getX(), p.getY(), p.getZ())).collect(Collectors.toList());
     }
 
     public static List<BlockState> getBlockEntityBlockStates(World world) {
-        Map<BlockPos, BlockEntity> BlockEntityList = ((CraftWorld) world).getHandle().capturedTileEntities;
+        net.minecraft.world.level.Level nmsWorld = getWorld(world);
+        if(nmsWorld == null) return List.of();
+        Map<BlockPos, BlockEntity> BlockEntityList = nmsWorld.capturedTileEntities;
         // Safe to parallelize getPosition and getBlockAt
         return BlockEntityList.entrySet().stream().parallel().map(Map.Entry::getKey).map(p -> world.getBlockAt(p.getX(), p.getY(), p.getZ())).map(Block::getState).collect(Collectors.toList());
     }

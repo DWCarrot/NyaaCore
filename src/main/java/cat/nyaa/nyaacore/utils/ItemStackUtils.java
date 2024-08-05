@@ -7,20 +7,25 @@ import com.google.common.io.ByteStreams;
 import com.mojang.datafixers.DSL;
 import com.mojang.datafixers.DataFixer;
 import com.mojang.serialization.Dynamic;
+import io.papermc.paper.registry.RegistryKey;
+import net.minecraft.core.RegistryAccess;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtAccounter;
 import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.Tag;
 import net.minecraft.util.datafix.DataFixers;
 import net.minecraft.util.datafix.fixes.References;
+import net.minecraft.world.level.Level;
 import org.bukkit.Bukkit;
-import org.bukkit.craftbukkit.v1_20_R1.inventory.CraftItemStack;
+import org.bukkit.World;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.util.io.BukkitObjectOutputStream;
 
 import java.io.*;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Collectors;
 import java.util.zip.Deflater;
 import java.util.zip.DeflaterInputStream;
@@ -38,9 +43,25 @@ public final class ItemStackUtils {
             .maximumWeight(256L * 1024 * 1024).build(); // Hard Coded 256M
     private static NbtAccounter unlimitedNbtAccounter = null;
 
+    private static Level defaultLevel = null;
+
     static {
         //noinspection deprecation
         currentDataVersion = Bukkit.getUnsafe().getDataVersion();
+    }
+
+    private static Level getDefaultLevel() {
+        if (defaultLevel == null) {
+            var worlds = Bukkit.getWorlds();
+            if (worlds.isEmpty()) {
+                throw new RuntimeException("No world loaded");
+            }
+            defaultLevel = NmsUtils.getWorld(worlds.getFirst());
+            if(defaultLevel == null) {
+                throw new RuntimeException("Failed to get native world");
+            }
+        }
+        return defaultLevel;
     }
 
     /**
@@ -51,9 +72,14 @@ public final class ItemStackUtils {
      * @return binary NBT representation of the item stack
      */
     public static byte[] itemToBinary(ItemStack itemStack) throws IOException {
-        net.minecraft.world.item.ItemStack nativeItemStack = CraftItemStack.asNMSCopy(itemStack);
-        CompoundTag CompoundTag = new CompoundTag();
-        nativeItemStack.save(CompoundTag);
+        BukkitObjectOutputStream bukkitObjectOutputStream = new BukkitObjectOutputStream(new ByteArrayOutputStream());
+        bukkitObjectOutputStream.writeObject(itemStack);
+        net.minecraft.world.item.ItemStack nativeItemStack = ItemTagUtils.getItem(itemStack);
+        if (nativeItemStack == null) {
+            throw new RuntimeException("Failed to get native item");
+        }
+        net.minecraft.world.level.Level nativeWorld = getDefaultLevel();
+        CompoundTag CompoundTag = (CompoundTag) nativeItemStack.save(nativeWorld.registryAccess());
         CompoundTag.putInt(NYAACORE_ITEMSTACK_DATAVERSION_KEY, currentDataVersion);
 
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -78,13 +104,11 @@ public final class ItemStackUtils {
 
     public static ItemStack itemFromBinary(byte[] nbt, int offset, int len) throws IOException {
         if (unlimitedNbtAccounter == null) {
-            unlimitedNbtAccounter = NbtAccounter.UNLIMITED;
+            unlimitedNbtAccounter = NbtAccounter.unlimitedHeap();
         }
-
-        //Constructor<?> constructNativeItemStackFromCompoundTag = classNativeItemStack.getConstructor(classCompoundTag);
         ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(nbt, offset, len);
         DataInputStream dataInputStream = new DataInputStream(byteArrayInputStream);
-        CompoundTag reconstructedCompoundTag = CompoundTag.TYPE.load(dataInputStream, 0, unlimitedNbtAccounter);
+        CompoundTag reconstructedCompoundTag = CompoundTag.TYPE.load(dataInputStream, unlimitedNbtAccounter);
         dataInputStream.close();
         byteArrayInputStream.close();
         int dataVersion = reconstructedCompoundTag.getInt(NYAACORE_ITEMSTACK_DATAVERSION_KEY);
@@ -103,8 +127,12 @@ public final class ItemStackUtils {
             Dynamic<Tag> out = dataFixer_instance.update(References_ITEM_STACK, dynamicInstance, dataVersion, currentDataVersion);
             reconstructedCompoundTag = (CompoundTag) out.getValue();
         }
-        net.minecraft.world.item.ItemStack reconstructedNativeItemStack = net.minecraft.world.item.ItemStack.of(reconstructedCompoundTag);
-        return CraftItemStack.asBukkitCopy(reconstructedNativeItemStack);
+        net.minecraft.world.level.Level nativeWorld = getDefaultLevel();
+        Optional<net.minecraft.world.item.ItemStack> reconstructedNativeItemStack = net.minecraft.world.item.ItemStack.parse(nativeWorld.registryAccess(), reconstructedCompoundTag);
+        if(reconstructedNativeItemStack.isEmpty()) {
+            throw new RuntimeException("Failed to parse item stack");
+        }
+        return reconstructedNativeItemStack.get().getBukkitStack();
     }
 
     private static byte[] compress(byte[] data) {
@@ -223,11 +251,13 @@ public final class ItemStackUtils {
         CompoundTag nmsCompoundTagObj; // This will just be an empty CompoundTag instance to invoke the saveNms method
         net.minecraft.world.item.ItemStack nmsItemStackObj; // This is the net.minecraft.server.ItemStack object received from the asNMSCopy method
         CompoundTag itemAsJsonObject; // This is the net.minecraft.server.ItemStack after being put through saveNmsItem method
-
         try {
-            nmsCompoundTagObj = new CompoundTag();
-            nmsItemStackObj = CraftItemStack.asNMSCopy(itemStack);
-            itemAsJsonObject = nmsItemStackObj.save(nmsCompoundTagObj);
+            nmsItemStackObj = ItemTagUtils.getItem(itemStack);
+            if (nmsItemStackObj == null) {
+                throw new RuntimeException("failed to get nms item from itemstack");
+            }
+            var nmsWorld = getDefaultLevel();
+            itemAsJsonObject = (CompoundTag) nmsItemStackObj.save(nmsWorld.registryAccess());
         } catch (Throwable t) {
             throw new RuntimeException("failed to serialize itemstack to nms item", t);
         }
@@ -237,10 +267,10 @@ public final class ItemStackUtils {
     }
 
     /**
-     * @deprecated caller should use {@link CraftItemStack#asNMSCopy(ItemStack)} directly
+     * @deprecated caller should use {@link net.minecraft.world.item.ItemStack#fromBukkitCopy(ItemStack)} directly
      */
     @Deprecated
     public static Object asNMSCopy(ItemStack itemStack) {
-        return CraftItemStack.asNMSCopy(itemStack);
+        return net.minecraft.world.item.ItemStack.fromBukkitCopy(itemStack);
     }
 }
